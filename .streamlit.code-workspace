@@ -1,0 +1,25 @@
+{
+	"folders": [
+		{
+			"path": "../Users/raiha/Downloads/finwise_ai/finwise_ai/.streamlit"
+		},
+		{
+			"path": "../Users/raiha/Downloads/finwise_ai/finwise_ai/assets"
+		},
+		{
+			"path": "../Users/raiha/Downloads/finwise_ai/finwise_ai/data"
+		},
+		{
+			"path": "../Users/raiha/Downloads/finwise_ai/finwise_ai/models"
+		},
+		{
+			"path": "../Users/raiha/Downloads/finwise_ai/finwise_ai/pages"
+		},
+		{
+			"path": "../Users/raiha/Downloads/finwise_ai/finwise_ai/tests"
+		},
+		{
+			"path": "../Users/raiha/Downloads/finwise_ai/finwise_ai/utils"
+		}
+	]
+}

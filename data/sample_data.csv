@@ -1,0 +1,7 @@
+date,type,category,amount,description
+2026-09-01,income,Salary,4900.00,Monthly salary
+2026-09-03,expense,Housing,1450.00,Apartment rent
+2026-09-05,expense,Food,98.24,Neighborhood market
+2026-09-07,expense,Housing,124.60,Electric and water
+2026-09-09,expense,Transportation,72.00,Monthly transit pass
+2026-09-20,income,Freelance,220.00,Freelance editing project

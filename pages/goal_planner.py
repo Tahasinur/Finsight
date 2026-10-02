@@ -59,14 +59,15 @@ def render(frame: pd.DataFrame) -> None:
 
     if submitted:
         try:
-            result = plan_savings_goal(
-                goal_name,
-                target_amount,
-                current_savings,
-                max_monthly_saving,
-                baseline_monthly_savings=baseline,
-                maximum_lifestyle_cut=lifestyle_cut,
-            )
+            with st.spinner("Finding optimal goal roadmap with A* search..."):
+                result = plan_savings_goal(
+                    goal_name,
+                    target_amount,
+                    current_savings,
+                    max_monthly_saving,
+                    baseline_monthly_savings=baseline,
+                    maximum_lifestyle_cut=lifestyle_cut,
+                )
             saved_goal = None
             user_id = st.session_state.get("user_id")
             if user_id:

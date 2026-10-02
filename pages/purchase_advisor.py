@@ -103,46 +103,47 @@ def render(frame: pd.DataFrame) -> None:
             selected_goal = goal_by_id.get(goal_id)
             selected_goal_days = _days_until_goal(selected_goal) if selected_goal else 3650
             try:
-                prediction = predict_purchase(
-                    models,
-                    item_cost=price,
-                    current_balance=balance,
-                    days_left_in_month=days_left,
-                    goal_urgency=urgency,
-                    category=category,
-                    monthly_income=monthly_income,
-                    monthly_expenses=monthly_expenses,
-                    savings_rate=savings_rate,
-                    discretionary_spending_share=discretionary_share,
-                    nearest_goal_days_left=nearest_goal_days,
-                    goal_gap_ratio=nearest_goal_gap,
-                    consumer_type=consumer_type,
-                )
-                goal_impact = None
-                if selected_goal:
-                    goal_impact = simulate_goal_impact(
-                        price,
-                        float(selected_goal["target_amount"]),
-                        float(selected_goal["current_savings"]),
-                        selected_goal_days,
-                        float(selected_goal["monthly_saving_limit"]),
+                with st.spinner("Evaluating purchase risk and goal impact..."):
+                    prediction = predict_purchase(
+                        models,
+                        item_cost=price,
+                        current_balance=balance,
+                        days_left_in_month=days_left,
+                        goal_urgency=urgency,
+                        category=category,
+                        monthly_income=monthly_income,
+                        monthly_expenses=monthly_expenses,
+                        savings_rate=savings_rate,
+                        discretionary_spending_share=discretionary_share,
+                        nearest_goal_days_left=nearest_goal_days,
+                        goal_gap_ratio=nearest_goal_gap,
+                        consumer_type=consumer_type,
                     )
-                alternative = _alternative_suggestion(
-                    models,
-                    prediction["verdict"],
-                    price,
-                    balance,
-                    days_left,
-                    urgency,
-                    category,
-                    monthly_income,
-                    monthly_expenses,
-                    savings_rate,
-                    discretionary_share,
-                    nearest_goal_days,
-                    nearest_goal_gap,
-                    consumer_type,
-                )
+                    goal_impact = None
+                    if selected_goal:
+                        goal_impact = simulate_goal_impact(
+                            price,
+                            float(selected_goal["target_amount"]),
+                            float(selected_goal["current_savings"]),
+                            selected_goal_days,
+                            float(selected_goal["monthly_saving_limit"]),
+                        )
+                    alternative = _alternative_suggestion(
+                        models,
+                        prediction["verdict"],
+                        price,
+                        balance,
+                        days_left,
+                        urgency,
+                        category,
+                        monthly_income,
+                        monthly_expenses,
+                        savings_rate,
+                        discretionary_share,
+                        nearest_goal_days,
+                        nearest_goal_gap,
+                        consumer_type,
+                    )
             except ValueError as error:
                 st.error(str(error))
                 st.session_state.pop("purchase_advisor_run", None)
@@ -184,7 +185,8 @@ def render(frame: pd.DataFrame) -> None:
 
 def _consumer_type(frame: pd.DataFrame) -> tuple[str, str | None]:
     try:
-        result = fit_spending_clusters(frame)
+        signature = transaction_fingerprint(frame) if not frame.empty else None
+        result = fit_spending_clusters(frame, fingerprint=signature)
         return result.latest_profile, None
     except ValueError as error:
         return "Unknown", f"Consumer type needs at least three distinct months of transactions. Purchase check will not assume a profile. {error}"
@@ -194,7 +196,7 @@ def _active_goals() -> list[dict]:
     user_id = st.session_state.get("user_id")
     if not user_id:
         return []
-    return [goal for goal in get_user_goals(user_id) if goal["active"]]
+    return get_user_goals(user_id, active_only=True)
 
 
 def _goal_option_label(goal_id: str, goals: dict[str, dict]) -> str:

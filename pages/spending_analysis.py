@@ -7,6 +7,7 @@ import streamlit as st
 
 from models.spending_clustering import CLUSTER_FEATURES, fit_spending_clusters
 from models.preprocessing import preprocess_transactions
+from utils.calculations import transaction_fingerprint
 
 
 PROFILE_COLORS = {
@@ -24,8 +25,10 @@ def render(frame: pd.DataFrame) -> None:
         st.info("Add transactions across at least three months to discover a spending pattern.")
         return
 
+    signature = transaction_fingerprint(frame)
     try:
-        result = fit_spending_clusters(frame)
+        with st.spinner("Analyzing spending behavior..."):
+            result = fit_spending_clusters(frame, fingerprint=signature)
     except ValueError as error:
         st.info("There is not enough varied monthly activity to compare spending patterns yet.")
         try:
@@ -96,7 +99,8 @@ def render(frame: pd.DataFrame) -> None:
         xaxis=dict(tickformat=".0%", gridcolor="#E2E8F0", tickfont=dict(color="#134E4A")),
         yaxis=dict(tickformat=".0%", gridcolor="#E2E8F0", tickfont=dict(color="#134E4A")),
     )
-    st.plotly_chart(figure, width="stretch", theme=None, config={"displayModeBar": False})
+    with st.expander("View spending pattern chart", expanded=True):
+        st.plotly_chart(figure, width="stretch", theme=None, config={"displayModeBar": False})
 
     st.subheader("What each pattern looks like")
     characteristics = result.cluster_characteristics.rename(

@@ -385,12 +385,26 @@ def list_user_summaries(admin_user_id: str, db_path: str | Path = AUTH_DB_PATH) 
     path = Path(db_path).resolve()
     with _connect(path) as connection:
         rows = connection.execute(
-            "SELECT user_id, email, display_name, role, created_at FROM users ORDER BY created_at DESC"
+            """
+            SELECT 
+                u.user_id, 
+                u.email, 
+                u.display_name, 
+                u.role, 
+                u.created_at,
+                COUNT(t.transaction_id) AS transaction_count,
+                MAX(t.date) AS latest_activity,
+                SUM(CASE WHEN t.type = 'income' THEN t.amount ELSE 0 END) AS total_income,
+                SUM(CASE WHEN t.type = 'expense' THEN t.amount ELSE 0 END) AS total_expenses
+            FROM users u
+            LEFT JOIN transactions t ON u.user_id = t.user_id
+            GROUP BY u.user_id, u.email, u.display_name, u.role, u.created_at
+            ORDER BY u.created_at DESC
+            """
         ).fetchall()
         summaries = []
         for row in rows:
-            tx_row = connection.execute("SELECT COUNT(*) AS cnt FROM transactions WHERE user_id = ?", (row["user_id"],)).fetchone()
-            transaction_count = int(tx_row["cnt"]) if tx_row else 0
+            transaction_count = int(row["transaction_count"] or 0)
             if transaction_count == 0:
                 ledger = path.parent / "user_data" / row["user_id"] / "transactions.csv"
                 if ledger.is_file():
@@ -403,6 +417,8 @@ def list_user_summaries(admin_user_id: str, db_path: str | Path = AUTH_DB_PATH) 
                     "role": row["role"],
                     "created_at": row["created_at"],
                     "transaction_count": transaction_count,
+                    "latest_activity": row["latest_activity"] or "N/A",
+                    "total_volume": float(row["total_income"] or 0.0) + float(row["total_expenses"] or 0.0),
                 }
             )
     return summaries
@@ -412,8 +428,11 @@ def get_admin_system_stats(admin_user_id: str, db_path: str | Path = AUTH_DB_PAT
     _require_admin(admin_user_id, db_path)
     path = Path(db_path).resolve()
     with _connect(path) as connection:
-        user_count = int(connection.execute("SELECT COUNT(*) FROM users").fetchone()[0])
-        admin_count = int(connection.execute("SELECT COUNT(*) FROM users WHERE role = 'admin'").fetchone()[0])
+        counts_row = connection.execute(
+            "SELECT COUNT(*), SUM(CASE WHEN role = 'admin' THEN 1 ELSE 0 END) FROM users"
+        ).fetchone()
+        user_count = int(counts_row[0]) if counts_row else 0
+        admin_count = int(counts_row[1] or 0) if counts_row else 0
         goal_count = int(connection.execute("SELECT COUNT(*) FROM user_goals WHERE active = 1").fetchone()[0])
         db_tx_count = int(connection.execute("SELECT COUNT(*) FROM transactions").fetchone()[0])
     ledgers = list((path.parent / "user_data").glob("*/transactions.csv"))
@@ -463,17 +482,20 @@ def validate_profile_picture(image_bytes: bytes) -> None:
     _validated_avatar_image(image_bytes)
 
 
-def get_user_goals(user_id: str, db_path: str | Path = AUTH_DB_PATH) -> list[dict]:
+def get_user_goals(user_id: str, db_path: str | Path = AUTH_DB_PATH, active_only: bool = False) -> list[dict]:
     user = get_user_by_id(user_id, db_path)
     if user is None:
         raise ValueError("Account not found. Sign in again to view goals.")
     with _connect(Path(db_path)) as connection:
-        rows = connection.execute(
+        query = (
             "SELECT goal_id, goal_name, target_amount, current_savings, monthly_saving_limit, "
             "deadline_date, active, created_at, updated_at FROM user_goals "
-            "WHERE user_id = ? ORDER BY deadline_date, goal_name",
-            (user["user_id"],),
-        ).fetchall()
+            "WHERE user_id = ?"
+        )
+        if active_only:
+            query += " AND active = 1"
+        query += " ORDER BY deadline_date, goal_name"
+        rows = connection.execute(query, (user["user_id"],)).fetchall()
     return [dict(row) for row in rows]
 
 

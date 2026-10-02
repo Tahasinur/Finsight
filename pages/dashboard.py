@@ -111,10 +111,11 @@ def render(frame: pd.DataFrame, store_path: str | Path | None = None) -> None:
                 st.rerun()
         return
 
+    signature = transaction_fingerprint(frame) if not frame.empty else ""
     left, right = st.columns([1.15, 0.85], gap="large")
     with left:
         st.subheader("Cash flow")
-        flow = monthly_cash_flow(frame)
+        flow = monthly_cash_flow(frame, fingerprint=signature)
         if flow.empty:
             st.info("Cash flow will appear after dated transactions are added.")
         else:
@@ -132,7 +133,8 @@ def render(frame: pd.DataFrame, store_path: str | Path | None = None) -> None:
             st.plotly_chart(chart, width="stretch", theme=None, config={"displayModeBar": False})
     with right:
         st.subheader("Where spending goes")
-        categories = spending_by_category(current)
+        curr_sig = transaction_fingerprint(current) if not current.empty else ""
+        categories = spending_by_category(current, fingerprint=curr_sig)
         if categories.empty:
             st.info("No expenses in this period yet.")
         else:
@@ -228,7 +230,8 @@ def _currency_delta(value: float, suffix: str = "vs previous period") -> str:
 
 def _consumer_profile(frame: pd.DataFrame) -> tuple[str, str | None]:
     try:
-        profile = fit_spending_clusters(frame)
+        signature = transaction_fingerprint(frame) if not frame.empty else None
+        profile = fit_spending_clusters(frame, fingerprint=signature)
         return profile.latest_profile, None
     except ValueError as error:
         return "Building pattern", f"Add at least three distinct months for a K-Means consumer type. {error}"
@@ -238,7 +241,7 @@ def _active_goals() -> list[dict]:
     user_id = st.session_state.get("user_id")
     if not user_id:
         return []
-    return [goal for goal in get_user_goals(user_id) if goal["active"]]
+    return get_user_goals(user_id, active_only=True)
 
 
 def _repeat_cost_anomalies(all_transactions: pd.DataFrame, period_transactions: pd.DataFrame) -> pd.DataFrame:
@@ -248,19 +251,31 @@ def _repeat_cost_anomalies(all_transactions: pd.DataFrame, period_transactions: 
     history = all_transactions.loc[
         (all_transactions["type"] == "expense") & ~all_transactions["transaction_id"].isin(period_ids)
     ]
+    if history.empty:
+        return pd.DataFrame(columns=["description", "amount", "median"])
+
     current_expenses = period_transactions.loc[period_transactions["type"] == "expense"]
+    if current_expenses.empty:
+        return pd.DataFrame(columns=["description", "amount", "median"])
+
+    hist_clean = history.assign(desc_key=history["description"].astype(str).str.casefold())
+    stats = hist_clean.groupby(["desc_key", "category"])["amount"].agg(count="count", median="median")
+    valid_priors = stats.loc[stats["count"] >= 3]
+    if valid_priors.empty:
+        return pd.DataFrame(columns=["description", "amount", "median"])
+
     anomalies = []
-    for _, transaction in current_expenses.iterrows():
-        prior = history.loc[
-            (history["description"].str.casefold() == str(transaction["description"]).casefold())
-            & (history["category"] == transaction["category"]),
-            "amount",
-        ]
-        if len(prior) < 3:
-            continue
-        median = float(prior.median())
-        if median > 0 and float(transaction["amount"]) > median * 1.5:
-            anomalies.append({"description": transaction["description"], "amount": float(transaction["amount"]), "median": median})
+    for _, tx in current_expenses.iterrows():
+        key = (str(tx["description"]).casefold(), tx["category"])
+        if key in valid_priors.index:
+            median = float(valid_priors.at[key, "median"])
+            amount = float(tx["amount"])
+            if median > 0 and amount > median * 1.5:
+                anomalies.append({
+                    "description": tx["description"],
+                    "amount": amount,
+                    "median": median,
+                })
     return pd.DataFrame(anomalies, columns=["description", "amount", "median"])
 
 

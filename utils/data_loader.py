@@ -155,25 +155,26 @@ def load_transactions(
     path: str | Path = DEFAULT_DATA_PATH,
     user_id: str | None = None,
     db_path: str | Path = AUTH_DB_PATH,
+    limit: int | None = None,
+    offset: int = 0,
 ) -> pd.DataFrame:
-    """Read transactions from SQLite user store or standalone CSV file."""
+    """Read transactions from SQLite user store or standalone CSV file with optional pagination."""
     target_user, target_db, csv_path = _resolve_target(path, user_id, db_path)
     if target_db is not None:
         from utils.auth import _connect, initialize_auth_store
 
         initialize_auth_store(target_db)
         with _connect(target_db) as connection:
+            query = "SELECT transaction_id, date, type, category, amount, description FROM transactions"
+            params = []
             if target_user:
-                rows = connection.execute(
-                    "SELECT transaction_id, date, type, category, amount, description "
-                    "FROM transactions WHERE user_id = ? ORDER BY date DESC, transaction_id DESC",
-                    (target_user,),
-                ).fetchall()
-            else:
-                rows = connection.execute(
-                    "SELECT transaction_id, date, type, category, amount, description "
-                    "FROM transactions ORDER BY date DESC, transaction_id DESC"
-                ).fetchall()
+                query += " WHERE user_id = ?"
+                params.append(target_user)
+            query += " ORDER BY date DESC, transaction_id DESC"
+            if limit is not None:
+                query += " LIMIT ? OFFSET ?"
+                params.extend([int(limit), int(offset)])
+            rows = connection.execute(query, tuple(params)).fetchall()
         if not rows:
             empty = pd.DataFrame(columns=TRANSACTION_COLUMNS)
             empty["date"] = pd.to_datetime(empty["date"])
@@ -196,6 +197,8 @@ def load_transactions(
     if not csv_path.is_file():
         raise OSError(f"File not found: {csv_path}")
     loaded = normalize_transactions(pd.read_csv(csv_path))
+    if limit is not None:
+        return loaded.iloc[offset : offset + limit].reset_index(drop=True)
     return loaded
 
 

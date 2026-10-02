@@ -18,6 +18,8 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
+import streamlit as st
+
 from models.purchase_features import (
 	CATEGORY_IMPACT_WEIGHTS,
 	PURCHASE_FEATURE_COLUMNS,
@@ -155,6 +157,7 @@ def load_or_create_synthetic_dataset(
 	return features, labels
 
 
+@st.cache_resource(show_spinner="Training synthetic demo classifiers...")
 def train_purchase_models(
 	sample_count: int = SYNTHETIC_SAMPLE_COUNT,
 	random_seed: int = 42,

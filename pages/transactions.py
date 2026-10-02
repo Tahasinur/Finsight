@@ -58,47 +58,121 @@ def render(frame: pd.DataFrame, store_path: str | Path | None = None) -> None:
 
 def _render_transaction_table(frame: pd.DataFrame) -> None:
     st.subheader("Transaction history")
-    search_col, type_col, category_col, date_col = st.columns([1.4, 0.8, 1, 1.4])
-    search = search_col.text_input("Search", placeholder="Description or category")
-    selected_type = type_col.selectbox("Type", ["All", "Income", "Expense"])
-    categories = ["All", *sorted(frame["category"].dropna().unique().tolist())]
-    selected_category = category_col.selectbox("Category", categories)
 
     valid_dates = frame["date"].dropna()
-    if valid_dates.empty:
-        date_range = None
-        date_col.caption("No valid transaction dates to filter.")
-    else:
-        start = valid_dates.min().date()
-        end = valid_dates.max().date()
-        date_range = date_col.date_input("Date range", value=(start, end))
+    default_start = valid_dates.min().date() if not valid_dates.empty else date.today()
+    default_end = valid_dates.max().date() if not valid_dates.empty else date.today()
+    categories = ["All", *sorted(frame["category"].dropna().unique().tolist())]
+
+    with st.form("transaction_filter_form"):
+        search_col, type_col, category_col, date_col = st.columns([1.4, 0.8, 1, 1.4])
+        search = search_col.text_input(
+            "Search",
+            value=st.session_state.get("tx_filter_search", ""),
+            placeholder="Description or category",
+        )
+        type_options = ["All", "Income", "Expense"]
+        default_type_idx = (
+            type_options.index(st.session_state["tx_filter_type"])
+            if st.session_state.get("tx_filter_type") in type_options
+            else 0
+        )
+        selected_type = type_col.selectbox("Type", type_options, index=default_type_idx)
+
+        default_cat_idx = (
+            categories.index(st.session_state["tx_filter_category"])
+            if st.session_state.get("tx_filter_category") in categories
+            else 0
+        )
+        selected_category = category_col.selectbox("Category", categories, index=default_cat_idx)
+
+        if valid_dates.empty:
+            date_range = None
+            date_col.caption("No valid transaction dates to filter.")
+        else:
+            saved_dates = st.session_state.get("tx_filter_dates", (default_start, default_end))
+            date_range = date_col.date_input("Date range", value=saved_dates)
+
+        apply_filters = st.form_submit_button("Apply filters", type="primary")
+
+    if apply_filters:
+        st.session_state["tx_filter_search"] = search
+        st.session_state["tx_filter_type"] = selected_type
+        st.session_state["tx_filter_category"] = selected_category
+        st.session_state["tx_filter_dates"] = date_range
+        st.session_state["tx_current_page"] = 1
+
+    active_search = st.session_state.get("tx_filter_search", search)
+    active_type = st.session_state.get("tx_filter_type", selected_type)
+    active_category = st.session_state.get("tx_filter_category", selected_category)
+    active_dates = st.session_state.get("tx_filter_dates", date_range)
 
     filtered = frame.copy()
-    if selected_type != "All":
-        filtered = filtered.loc[filtered["type"] == selected_type.lower()]
-    if selected_category != "All":
-        filtered = filtered.loc[filtered["category"] == selected_category]
-    if search:
+    if active_type != "All":
+        filtered = filtered.loc[filtered["type"] == active_type.lower()]
+    if active_category != "All":
+        filtered = filtered.loc[filtered["category"] == active_category]
+    if active_search:
         searchable = filtered[["description", "category", "type"]].astype("string")
         matches = searchable.apply(
-            lambda column: column.str.contains(search, case=False, regex=False, na=False)
+            lambda column: column.str.contains(active_search, case=False, regex=False, na=False)
         ).any(axis=1)
         filtered = filtered.loc[matches]
-    if isinstance(date_range, (tuple, list)) and len(date_range) == 2:
-        start_date, end_date = date_range
+    if isinstance(active_dates, (tuple, list)) and len(active_dates) == 2:
+        start_date, end_date = active_dates
         filtered = filtered.loc[
             filtered["date"].dt.date.between(start_date, end_date)
         ]
 
-    st.caption(f"Showing {len(filtered):,} of {len(frame):,} transactions")
-    table = filtered.drop(columns=["transaction_id"], errors="ignore").rename(
-        columns={"date": "Date", "type": "Type", "category": "Category", "amount": "Amount", "description": "Description"}
-    )
-    st.dataframe(
-        table,
-        width="stretch",
-        hide_index=True,
-        column_config={"Amount": st.column_config.NumberColumn(format="$%.2f")},
+    total_rows = len(filtered)
+
+    ctrl_col1, ctrl_col2, ctrl_col3, ctrl_col4 = st.columns([1.2, 1, 1, 2])
+    page_size = ctrl_col1.selectbox("Rows per page", [25, 50, 100], index=0, key="tx_page_size")
+    total_pages = max(1, (total_rows + page_size - 1) // page_size)
+
+    current_page = st.session_state.get("tx_current_page", 1)
+    if current_page > total_pages:
+        current_page = total_pages
+        st.session_state["tx_current_page"] = current_page
+
+    prev_clicked = ctrl_col2.button("← Previous", disabled=(current_page <= 1), key="tx_prev_btn")
+    next_clicked = ctrl_col3.button("Next →", disabled=(current_page >= total_pages), key="tx_next_btn")
+
+    if prev_clicked and current_page > 1:
+        st.session_state["tx_current_page"] = current_page - 1
+        st.rerun()
+    elif next_clicked and current_page < total_pages:
+        st.session_state["tx_current_page"] = current_page + 1
+        st.rerun()
+
+    current_page = st.session_state.get("tx_current_page", 1)
+    start_idx = (current_page - 1) * page_size
+    end_idx = min(start_idx + page_size, total_rows)
+
+    ctrl_col4.markdown(f"**Page {current_page} of {total_pages}** &nbsp;·&nbsp; {total_rows:,} matches")
+
+    if total_rows > 0:
+        st.caption(f"Showing rows {start_idx + 1}–{end_idx} of {total_rows:,} filtered transactions (from {len(frame):,} in ledger)")
+        page_slice = filtered.iloc[start_idx:end_idx]
+        table = page_slice.drop(columns=["transaction_id"], errors="ignore").rename(
+            columns={"date": "Date", "type": "Type", "category": "Category", "amount": "Amount", "description": "Description"}
+        )
+        st.dataframe(
+            table,
+            width="stretch",
+            hide_index=True,
+            column_config={"Amount": st.column_config.NumberColumn(format="$%.2f")},
+        )
+    else:
+        st.info("No transactions match the selected filters.")
+
+    export_csv = filtered.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        "Export filtered transactions (CSV)",
+        data=export_csv,
+        file_name="transactions_filtered.csv",
+        mime="text/csv",
+        help="Export all records matching your active filters to a CSV file.",
     )
 
 

@@ -77,7 +77,8 @@ def render(frame: pd.DataFrame) -> None:
             "savings": savings,
         }
         try:
-            result = optimize_budget_csp(income, targets)
+            with st.spinner("Solving budget allocation CSP..."):
+                result = optimize_budget_csp(income, targets)
         except ValueError as error:
             st.session_state.pop("budget_optimizer_run", None)
             st.error(str(error))

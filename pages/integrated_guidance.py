@@ -79,7 +79,9 @@ def render(frame: pd.DataFrame) -> None:
 
     st.header("SPENDING PATTERN")
     try:
-        profile = fit_spending_clusters(frame) if not frame.empty else None
+        signature = transaction_fingerprint(frame) if not frame.empty else None
+        with st.spinner("Synthesizing spending behavior profile..."):
+            profile = fit_spending_clusters(frame, fingerprint=signature) if not frame.empty else None
     except ValueError as error:
         profile = None
         st.info(f"A consumer type is not available yet: {error}")

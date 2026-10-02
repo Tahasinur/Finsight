@@ -40,18 +40,19 @@ def render(frame: pd.DataFrame) -> None:
         ]
     )
     st.dataframe(evaluation_table, width="stretch", hide_index=True)
-    confusion_columns = st.columns(2)
-    for column, model_name in zip(confusion_columns, purchase_models.evaluation):
-        with column:
-            metrics = purchase_models.evaluation[model_name]
-            st.markdown(f"**{model_name} · confusion matrix**")
-            matrix = pd.DataFrame(metrics.confusion_matrix, index=CLASS_NAMES, columns=CLASS_NAMES)
-            matrix.index.name = "Actual"
-            st.dataframe(matrix, width="stretch")
+    with st.expander("View Confusion Matrices & Model Breakdown", expanded=False):
+        confusion_columns = st.columns(2)
+        for column, model_name in zip(confusion_columns, purchase_models.evaluation):
+            with column:
+                metrics = purchase_models.evaluation[model_name]
+                st.markdown(f"**{model_name} · confusion matrix**")
+                matrix = pd.DataFrame(metrics.confusion_matrix, index=CLASS_NAMES, columns=CLASS_NAMES)
+                matrix.index.name = "Actual"
+                st.dataframe(matrix, width="stretch")
 
     st.header("K-Means spending clusters")
     try:
-        clustering = fit_spending_clusters(frame) if not frame.empty else None
+        clustering = fit_spending_clusters(frame, fingerprint=signature) if not frame.empty else None
     except ValueError as error:
         clustering = None
         st.warning(f"Insufficient data for reliable evaluation. {error}")
@@ -78,7 +79,6 @@ def render(frame: pd.DataFrame) -> None:
         )
         st.dataframe(distribution, width="stretch", hide_index=True)
 
-        st.markdown("**Cluster visualization**")
         points = clustering.assignments.copy()
         points["month_label"] = points["month"].dt.strftime("%b %Y")
         figure = px.scatter(
@@ -100,7 +100,8 @@ def render(frame: pd.DataFrame) -> None:
             xaxis=dict(tickformat=".0%", gridcolor="#E2E8F0"),
             yaxis=dict(tickformat=".0%", gridcolor="#E2E8F0"),
         )
-        st.plotly_chart(figure, width="stretch", theme=None, config={"displayModeBar": False})
+        with st.expander("View Cluster Visualization Scatter Plot", expanded=True):
+            st.plotly_chart(figure, width="stretch", theme=None, config={"displayModeBar": False})
     else:
         st.info("Insufficient data for reliable evaluation.")
 

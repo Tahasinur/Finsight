@@ -8,6 +8,7 @@ from sklearn.cluster import KMeans
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import MinMaxScaler
+import streamlit as st
 
 from models.preprocessing import preprocess_transactions
 
@@ -42,7 +43,11 @@ class SpendingClusteringResult:
 	profile_order: list[str]
 
 
-def fit_spending_clusters(frame: pd.DataFrame) -> SpendingClusteringResult:
+@st.cache_data(show_spinner=False)
+def fit_spending_clusters(
+	frame: pd.DataFrame,
+	fingerprint: str | None = None,
+) -> SpendingClusteringResult:
 	"""Fit three K-Means clusters using engineered monthly spending features."""
 	processed = preprocess_transactions(frame)
 	monthly_features = processed.monthly_metrics[["month", *CLUSTER_FEATURES]].copy()

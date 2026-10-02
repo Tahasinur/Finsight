@@ -10,7 +10,7 @@ from sklearn.metrics import silhouette_score
 from models.purchase_classifier import SYNTHETIC_DATASET_PATH, train_purchase_models
 from models.spending_clustering import fit_spending_clusters
 from utils.auth import get_admin_system_stats, list_user_summaries
-from utils.calculations import format_currency
+from utils.calculations import format_currency, transaction_fingerprint
 from utils.data_loader import DEFAULT_DATA_PATH, load_transactions, save_transactions
 
 
@@ -45,7 +45,22 @@ def render(user: dict, own_frame: pd.DataFrame, own_store_path: str | Path) -> N
     if account_table.empty:
         st.info("No registered accounts.")
     else:
-        st.dataframe(account_table, width="stretch", hide_index=True)
+        st.dataframe(
+            account_table.rename(
+                columns={
+                    "display_name": "Name",
+                    "email": "Email",
+                    "role": "Role",
+                    "created_at": "Joined",
+                    "transaction_count": "Transactions",
+                    "latest_activity": "Last Active",
+                    "total_volume": "Total Volume",
+                }
+            ),
+            width="stretch",
+            hide_index=True,
+            column_config={"Total Volume": st.column_config.NumberColumn(format="$%.2f")},
+        )
 
     st.subheader("Global demo model evaluation")
     st.caption("Purchase metrics use synthetic/demo labels. The clustering view uses only the bundled example ledger, never other users' private data.")
@@ -65,7 +80,7 @@ def render(user: dict, own_frame: pd.DataFrame, own_store_path: str | Path) -> N
     st.dataframe(model_metrics, width="stretch", hide_index=True)
     demo_transactions = load_transactions(DEFAULT_DATA_PATH)
     try:
-        clusters = fit_spending_clusters(demo_transactions)
+        clusters = fit_spending_clusters(demo_transactions, fingerprint=transaction_fingerprint(demo_transactions))
     except ValueError as error:
         st.info(f"Example-ledger consumer profile is unavailable: {error}")
     else:

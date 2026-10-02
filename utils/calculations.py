@@ -3,6 +3,7 @@
 import hashlib
 
 import pandas as pd
+import streamlit as st
 
 
 DISCRETIONARY_CATEGORIES = {"entertainment"}
@@ -36,7 +37,12 @@ def transaction_fingerprint(frame: pd.DataFrame) -> str:
     return hashlib.sha256(hashed_rows.to_numpy(dtype="uint64").tobytes()).hexdigest()
 
 
-def get_financial_summary(frame: pd.DataFrame, initial_balance: float = 0.0) -> dict[str, float | str]:
+@st.cache_data(show_spinner=False)
+def get_financial_summary(
+    frame: pd.DataFrame,
+    initial_balance: float = 0.0,
+    fingerprint: str | None = None,
+) -> dict[str, float | str]:
     income = float(frame.loc[frame["type"] == "income", "amount"].sum())
     expenses = float(frame.loc[frame["type"] == "expense", "amount"].sum())
     savings_rate = ((income - expenses) / income * 100) if income else 0.0
@@ -54,7 +60,11 @@ def get_financial_summary(frame: pd.DataFrame, initial_balance: float = 0.0) -> 
     }
 
 
-def monthly_cash_flow(frame: pd.DataFrame) -> pd.DataFrame:
+@st.cache_data(show_spinner=False)
+def monthly_cash_flow(
+    frame: pd.DataFrame,
+    fingerprint: str | None = None,
+) -> pd.DataFrame:
     if frame.empty:
         return pd.DataFrame(columns=["month", "income", "expense", "net_cash_flow"])
     monthly = frame.assign(month=frame["date"].dt.to_period("M").dt.to_timestamp())
@@ -70,7 +80,11 @@ def monthly_cash_flow(frame: pd.DataFrame) -> pd.DataFrame:
     return summary
 
 
-def monthly_financial_metrics(frame: pd.DataFrame) -> pd.DataFrame:
+@st.cache_data(show_spinner=False)
+def monthly_financial_metrics(
+    frame: pd.DataFrame,
+    fingerprint: str | None = None,
+) -> pd.DataFrame:
     """Calculate monthly cash-flow ratios and activity features from transactions."""
     if frame.empty:
         return pd.DataFrame(columns=MONTHLY_METRIC_COLUMNS)
@@ -119,7 +133,11 @@ def monthly_financial_metrics(frame: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame.from_records(records, columns=MONTHLY_METRIC_COLUMNS)
 
 
-def spending_by_category(frame: pd.DataFrame) -> pd.DataFrame:
+@st.cache_data(show_spinner=False)
+def spending_by_category(
+    frame: pd.DataFrame,
+    fingerprint: str | None = None,
+) -> pd.DataFrame:
     expenses = frame.loc[frame["type"] == "expense"]
     if expenses.empty:
         return pd.DataFrame(columns=["category", "amount"])

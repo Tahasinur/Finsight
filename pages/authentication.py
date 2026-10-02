@@ -69,7 +69,7 @@ def render_login(on_authenticated, on_open_register, on_open_home) -> None:
             try:
                 profile = authenticate_user(email, password)
             except ValueError as error:
-                st.error(str(error))
+                st.error(f"🔒 {error}")
             else:
                 if profile is None:
                     st.error("Email or password was not recognized.")

@@ -9,7 +9,8 @@ import re
 import secrets
 import sqlite3
 from contextlib import contextmanager
-from datetime import date, datetime
+from dataclasses import asdict, is_dataclass
+from datetime import date, datetime, timedelta, timezone
 from io import BytesIO
 from io import BytesIO as MemoryBuffer
 import json
@@ -80,10 +81,212 @@ def initialize_auth_store(db_path: str | Path = AUTH_DB_PATH) -> None:
             CREATE TABLE IF NOT EXISTS user_preferences (
                 user_id TEXT PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
                 dashboard_period TEXT NOT NULL DEFAULT 'Last 30 days',
+                initial_balance REAL NOT NULL DEFAULT 0.0,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
+        pref_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(user_preferences)").fetchall()
+        }
+        if "initial_balance" not in pref_columns:
+            connection.execute(
+                "ALTER TABLE user_preferences ADD COLUMN initial_balance REAL NOT NULL DEFAULT 0.0"
+            )
+        if "rule_thresholds" not in pref_columns:
+            connection.execute(
+                "ALTER TABLE user_preferences ADD COLUMN rule_thresholds TEXT DEFAULT NULL"
+            )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS analysis_runs (
+                run_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                module_type TEXT NOT NULL,
+                ledger_fingerprint TEXT NOT NULL,
+                result_payload TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_analysis_runs_user ON analysis_runs(user_id, module_type, created_at DESC)"
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS transactions (
+                transaction_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                date TEXT NOT NULL,
+                type TEXT CHECK(type IN ('Income', 'Expense', 'income', 'expense')) NOT NULL,
+                category TEXT NOT NULL,
+                amount REAL NOT NULL CHECK(amount > 0),
+                description TEXT DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_transactions_user_date ON transactions(user_id, date DESC)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_transactions_user_category ON transactions(user_id, category)"
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS custom_categories (
+                category_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                category_name TEXT NOT NULL,
+                category_type TEXT CHECK(category_type IN ('Income', 'Expense', 'income', 'expense')) NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (user_id, category_name)
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_custom_categories_user ON custom_categories(user_id)"
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS login_attempts (
+                email TEXT PRIMARY KEY,
+                attempt_count INTEGER DEFAULT 1,
+                last_attempt_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                locked_until TEXT
+            )
+            """
+        )
+    migrate_existing_csv_ledgers(path)
+
+
+MAX_LOGIN_ATTEMPTS = 5
+LOCKOUT_DURATION_SECONDS = 300  # 5 minutes
+
+
+def migrate_existing_csv_ledgers(db_path: str | Path = AUTH_DB_PATH) -> int:
+    """Migrate legacy per-user transactions.csv files into SQLite transactions table."""
+    path = Path(db_path)
+    user_data_dir = path.resolve().parent / "user_data"
+    if not user_data_dir.is_dir():
+        return 0
+
+    migrated_count = 0
+    with _connect(path) as connection:
+        user_ids = {row["user_id"] for row in connection.execute("SELECT user_id FROM users").fetchall()}
+        for user_folder in user_data_dir.iterdir():
+            if not user_folder.is_dir():
+                continue
+            user_id = user_folder.name
+            if user_id not in user_ids:
+                continue
+            csv_path = user_folder / "transactions.csv"
+            if not csv_path.is_file():
+                continue
+
+            try:
+                df = pd.read_csv(csv_path)
+                if not df.empty and "date" in df.columns and "amount" in df.columns:
+                    for _, row in df.iterrows():
+                        t_id = str(row.get("transaction_id", "")).strip() or str(uuid4())
+                        t_date = str(row.get("date", "")).strip()
+                        t_type = str(row.get("type", "expense")).strip()
+                        t_cat = str(row.get("category", "Other")).strip()
+                        try:
+                            t_amount = float(row.get("amount", 0))
+                        except (ValueError, TypeError):
+                            continue
+                        if t_amount <= 0 or not t_date:
+                            continue
+                        t_desc = str(row.get("description", "")).strip() if pd.notna(row.get("description")) else ""
+                        connection.execute(
+                            """
+                            INSERT OR IGNORE INTO transactions
+                            (transaction_id, user_id, date, type, category, amount, description, created_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                            """,
+                            (t_id, user_id, t_date, t_type, t_cat, t_amount, t_desc),
+                        )
+                        migrated_count += 1
+                backup_path = user_folder / "transactions.csv.migrated"
+                csv_path.replace(backup_path)
+            except Exception:
+                pass
+    return migrated_count
+
+
+def check_login_lockout(email: str, db_path: str | Path = AUTH_DB_PATH) -> tuple[bool, int]:
+    """Check if an email is locked out due to excessive failed attempts. Returns (is_locked, remaining_seconds)."""
+    try:
+        normalized_email = _normalize_email(email)
+    except ValueError:
+        return False, 0
+    path = Path(db_path)
+    with _connect(path) as connection:
+        row = connection.execute(
+            "SELECT attempt_count, locked_until FROM login_attempts WHERE email = ?",
+            (normalized_email,),
+        ).fetchone()
+    if not row or not row["locked_until"]:
+        return False, 0
+    try:
+        locked_until = datetime.fromisoformat(row["locked_until"])
+        now = datetime.now(timezone.utc)
+        if locked_until.tzinfo is None:
+            locked_until = locked_until.replace(tzinfo=timezone.utc)
+        remaining = int((locked_until - now).total_seconds())
+        if remaining > 0:
+            return True, remaining
+    except Exception:
+        pass
+    clear_login_attempts(normalized_email, path)
+    return False, 0
+
+
+def record_login_failure(email: str, db_path: str | Path = AUTH_DB_PATH) -> tuple[int, bool, int]:
+    """Record a failed login attempt. Returns (attempt_count, is_locked, lock_seconds)."""
+    try:
+        normalized_email = _normalize_email(email)
+    except ValueError:
+        return 1, False, 0
+    path = Path(db_path)
+    with _connect(path) as connection:
+        row = connection.execute(
+            "SELECT attempt_count, locked_until FROM login_attempts WHERE email = ?",
+            (normalized_email,),
+        ).fetchone()
+        if not row:
+            connection.execute(
+                "INSERT INTO login_attempts (email, attempt_count, last_attempt_at, locked_until) "
+                "VALUES (?, 1, CURRENT_TIMESTAMP, NULL)",
+                (normalized_email,),
+            )
+            return 1, False, 0
+        new_count = row["attempt_count"] + 1
+        if new_count >= MAX_LOGIN_ATTEMPTS:
+            locked_until = (datetime.now(timezone.utc) + timedelta(seconds=LOCKOUT_DURATION_SECONDS)).isoformat()
+            connection.execute(
+                "UPDATE login_attempts SET attempt_count = ?, last_attempt_at = CURRENT_TIMESTAMP, locked_until = ? WHERE email = ?",
+                (new_count, locked_until, normalized_email),
+            )
+            return new_count, True, LOCKOUT_DURATION_SECONDS
+        else:
+            connection.execute(
+                "UPDATE login_attempts SET attempt_count = ?, last_attempt_at = CURRENT_TIMESTAMP WHERE email = ?",
+                (new_count, normalized_email),
+            )
+            return new_count, False, 0
+
+
+def clear_login_attempts(email: str, db_path: str | Path = AUTH_DB_PATH) -> None:
+    """Clear failed login attempts after successful authentication or lockout expiration."""
+    try:
+        normalized_email = _normalize_email(email)
+    except ValueError:
+        return
+    path = Path(db_path)
+    with _connect(path) as connection:
+        connection.execute("DELETE FROM login_attempts WHERE email = ?", (normalized_email,))
 
 
 def register_user(
@@ -122,18 +325,36 @@ def authenticate_user(email: str, password: str, db_path: str | Path = AUTH_DB_P
     normalized_email = _normalize_email(email)
     path = Path(db_path)
     initialize_auth_store(path)
+
+    # 1. Check lockout status
+    is_locked, remaining_seconds = check_login_lockout(normalized_email, path)
+    if is_locked:
+        minutes = max(1, (remaining_seconds + 59) // 60)
+        raise ValueError(f"Account is temporarily locked due to too many failed attempts. Try again in {minutes} minute(s).")
+
     with _connect(path) as connection:
         row = connection.execute(
             "SELECT user_id, email, display_name, password_salt, password_hash, role, avatar_filename, created_at "
             "FROM users WHERE email = ?",
             (normalized_email,),
         ).fetchone()
+
     if row is None:
+        count, locked, remaining = record_login_failure(normalized_email, path)
+        if locked:
+            raise ValueError("Account is temporarily locked due to too many failed attempts. Try again in 5 minutes.")
         return None
 
     actual_hash = _hash_password(password, row["password_salt"])
     if not hmac.compare_digest(actual_hash, row["password_hash"]):
+        count, locked, remaining = record_login_failure(normalized_email, path)
+        if locked:
+            raise ValueError("Account is temporarily locked due to too many failed attempts. Try again in 5 minutes.")
         return None
+
+    # Clear attempts on successful authentication
+    clear_login_attempts(normalized_email, path)
+
     bootstrap_email = os.environ.get("FINWISE_ADMIN_EMAIL", "").strip().casefold()
     if bootstrap_email and normalized_email == bootstrap_email and row["role"] != "admin":
         with _connect(path) as connection:
@@ -166,22 +387,24 @@ def list_user_summaries(admin_user_id: str, db_path: str | Path = AUTH_DB_PATH) 
         rows = connection.execute(
             "SELECT user_id, email, display_name, role, created_at FROM users ORDER BY created_at DESC"
         ).fetchall()
-    summaries = []
-    for row in rows:
-        ledger = path.parent / "user_data" / row["user_id"] / "transactions.csv"
-        transaction_count = 0
-        if ledger.is_file():
-            with ledger.open("r", encoding="utf-8", newline="") as source:
-                transaction_count = max(0, sum(1 for _ in source) - 1)
-        summaries.append(
-            {
-                "display_name": row["display_name"],
-                "email": row["email"],
-                "role": row["role"],
-                "created_at": row["created_at"],
-                "transaction_count": transaction_count,
-            }
-        )
+        summaries = []
+        for row in rows:
+            tx_row = connection.execute("SELECT COUNT(*) AS cnt FROM transactions WHERE user_id = ?", (row["user_id"],)).fetchone()
+            transaction_count = int(tx_row["cnt"]) if tx_row else 0
+            if transaction_count == 0:
+                ledger = path.parent / "user_data" / row["user_id"] / "transactions.csv"
+                if ledger.is_file():
+                    with ledger.open("r", encoding="utf-8", newline="") as source:
+                        transaction_count = max(0, sum(1 for _ in source) - 1)
+            summaries.append(
+                {
+                    "display_name": row["display_name"],
+                    "email": row["email"],
+                    "role": row["role"],
+                    "created_at": row["created_at"],
+                    "transaction_count": transaction_count,
+                }
+            )
     return summaries
 
 
@@ -192,17 +415,19 @@ def get_admin_system_stats(admin_user_id: str, db_path: str | Path = AUTH_DB_PAT
         user_count = int(connection.execute("SELECT COUNT(*) FROM users").fetchone()[0])
         admin_count = int(connection.execute("SELECT COUNT(*) FROM users WHERE role = 'admin'").fetchone()[0])
         goal_count = int(connection.execute("SELECT COUNT(*) FROM user_goals WHERE active = 1").fetchone()[0])
+        db_tx_count = int(connection.execute("SELECT COUNT(*) FROM transactions").fetchone()[0])
     ledgers = list((path.parent / "user_data").glob("*/transactions.csv"))
-    transaction_count = 0
+    csv_tx_count = 0
     for ledger in ledgers:
         with ledger.open("r", encoding="utf-8", newline="") as source:
-            transaction_count += max(0, sum(1 for _ in source) - 1)
+            csv_tx_count += max(0, sum(1 for _ in source) - 1)
+    total_tx_count = db_tx_count if db_tx_count > 0 else csv_tx_count
     return {
         "user_count": user_count,
         "admin_count": admin_count,
         "active_goal_count": goal_count,
-        "private_ledger_count": len(ledgers),
-        "transaction_row_count": transaction_count,
+        "private_ledger_count": len(ledgers) or user_count,
+        "transaction_row_count": total_tx_count,
         "database_path": path.name,
     }
 
@@ -344,36 +569,260 @@ def get_user_preferences(user_id: str, db_path: str | Path = AUTH_DB_PATH) -> di
         raise ValueError("Account not found. Sign in again to load preferences.")
     with _connect(Path(db_path)) as connection:
         row = connection.execute(
-            "SELECT dashboard_period FROM user_preferences WHERE user_id = ?",
+            "SELECT dashboard_period, initial_balance FROM user_preferences WHERE user_id = ?",
             (user["user_id"],),
         ).fetchone()
-    return {"dashboard_period": row["dashboard_period"] if row else "Last 30 days"}
+    if row:
+        balance = 0.0
+        try:
+            balance = float(row["initial_balance"]) if row["initial_balance"] is not None else 0.0
+        except (ValueError, IndexError, KeyError):
+            pass
+        return {
+            "dashboard_period": row["dashboard_period"],
+            "initial_balance": balance,
+        }
+    return {"dashboard_period": "Last 30 days", "initial_balance": 0.0}
 
 
 def save_user_preferences(
     user_id: str,
-    dashboard_period: str,
+    dashboard_period: str | None = None,
+    initial_balance: float | None = None,
     db_path: str | Path = AUTH_DB_PATH,
 ) -> dict:
     user = get_user_by_id(user_id, db_path)
     if user is None:
         raise ValueError("Account not found. Sign in again to save preferences.")
-    if dashboard_period not in {"This month", "Last 30 days", "Custom"}:
+    current_prefs = get_user_preferences(user["user_id"], db_path)
+    period = dashboard_period if dashboard_period is not None else current_prefs["dashboard_period"]
+    balance = float(initial_balance) if initial_balance is not None else current_prefs["initial_balance"]
+    if period not in {"This month", "Last 30 days", "Custom"}:
         raise ValueError("Choose a supported dashboard period.")
+    if not isfinite(balance) or balance < 0:
+        raise ValueError("Starting balance must be a finite, nonnegative amount.")
     with _connect(Path(db_path)) as connection:
         connection.execute(
-            "INSERT INTO user_preferences (user_id, dashboard_period) VALUES (?, ?) "
-            "ON CONFLICT(user_id) DO UPDATE SET dashboard_period=excluded.dashboard_period, updated_at=CURRENT_TIMESTAMP",
-            (user["user_id"], dashboard_period),
+            "INSERT INTO user_preferences (user_id, dashboard_period, initial_balance) VALUES (?, ?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET dashboard_period=excluded.dashboard_period, "
+            "initial_balance=excluded.initial_balance, updated_at=CURRENT_TIMESTAMP",
+            (user["user_id"], period, balance),
         )
     return get_user_preferences(user["user_id"], db_path)
+
+
+def get_user_thresholds(user_id: str | None, db_path: str | Path = AUTH_DB_PATH):
+    """Retrieve personal rule thresholds for user, falling back to system defaults."""
+    from models.rule_engine import RuleThresholds
+
+    if not user_id:
+        return RuleThresholds()
+    user = get_user_by_id(user_id, db_path)
+    if user is None:
+        return RuleThresholds()
+    with _connect(Path(db_path)) as connection:
+        row = connection.execute(
+            "SELECT rule_thresholds FROM user_preferences WHERE user_id = ?",
+            (user["user_id"],),
+        ).fetchone()
+    if row and row["rule_thresholds"]:
+        try:
+            return RuleThresholds.from_dict(json.loads(row["rule_thresholds"]))
+        except Exception:
+            pass
+    return RuleThresholds()
+
+
+def save_user_thresholds(
+    user_id: str,
+    thresholds,
+    db_path: str | Path = AUTH_DB_PATH,
+):
+    """Save updated rule thresholds in user_preferences."""
+    from models.rule_engine import RuleThresholds
+
+    user = get_user_by_id(user_id, db_path)
+    if user is None:
+        raise ValueError("Account not found. Sign in again to save rule thresholds.")
+
+    t_obj = thresholds if isinstance(thresholds, RuleThresholds) else RuleThresholds.from_dict(thresholds)
+    for name, val in t_obj.to_dict().items():
+        if not isfinite(val) or val < 0 or val > 2.0:
+            raise ValueError(f"Threshold for {name} must be between 0% and 200%.")
+
+    payload = json.dumps(t_obj.to_dict())
+    with _connect(Path(db_path)) as connection:
+        connection.execute(
+            """
+            INSERT INTO user_preferences (user_id, dashboard_period, initial_balance, rule_thresholds)
+            VALUES (?, 'Last 30 days', 0.0, ?)
+            ON CONFLICT(user_id) DO UPDATE SET rule_thresholds=excluded.rule_thresholds, updated_at=CURRENT_TIMESTAMP
+            """,
+            (user["user_id"], payload),
+        )
+    return t_obj
+
+
+def get_user_categories(user_id: str | None, db_path: str | Path = AUTH_DB_PATH) -> dict[str, list[str]]:
+    """Return default categories combined with user-defined custom categories."""
+    from utils.data_loader import EXPENSE_CATEGORIES, INCOME_CATEGORIES
+
+    income = list(INCOME_CATEGORIES)
+    expense = list(EXPENSE_CATEGORIES)
+    if not user_id:
+        return {"income": income, "expense": expense}
+    user = get_user_by_id(user_id, db_path)
+    if user is None:
+        return {"income": income, "expense": expense}
+    with _connect(Path(db_path)) as connection:
+        rows = connection.execute(
+            "SELECT category_name, category_type FROM custom_categories WHERE user_id = ? ORDER BY category_name",
+            (user["user_id"],),
+        ).fetchall()
+    for row in rows:
+        name = row["category_name"]
+        cat_type = row["category_type"].lower()
+        if cat_type == "income" and name not in income:
+            income.append(name)
+        elif cat_type == "expense" and name not in expense:
+            expense.append(name)
+    return {"income": income, "expense": expense}
+
+
+def add_custom_category(
+    user_id: str,
+    name: str,
+    category_type: str,
+    db_path: str | Path = AUTH_DB_PATH,
+) -> str:
+    """Create a new custom category for a user."""
+    user = get_user_by_id(user_id, db_path)
+    if user is None:
+        raise ValueError("Account not found. Sign in again to add custom categories.")
+    clean_name = name.strip()
+    if not clean_name or len(clean_name) > 50:
+        raise ValueError("Category name must be between 1 and 50 characters.")
+    norm_type = category_type.strip().lower()
+    if norm_type not in {"income", "expense"}:
+        raise ValueError("Category type must be Income or Expense.")
+
+    existing = get_user_categories(user["user_id"], db_path)[norm_type]
+    if any(c.casefold() == clean_name.casefold() for c in existing):
+        raise ValueError(f"Category '{clean_name}' already exists for {norm_type.title()}.")
+
+    cat_id = str(uuid4())
+    stored_type = norm_type.title()
+    with _connect(Path(db_path)) as connection:
+        connection.execute(
+            """
+            INSERT INTO custom_categories (category_id, user_id, category_name, category_type, created_at)
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """,
+            (cat_id, user["user_id"], clean_name, stored_type),
+        )
+    return cat_id
+
+
+def delete_custom_category(
+    user_id: str,
+    category_id_or_name: str,
+    db_path: str | Path = AUTH_DB_PATH,
+) -> None:
+    """Delete a user's custom category by ID or name."""
+    user = get_user_by_id(user_id, db_path)
+    if user is None:
+        raise ValueError("Account not found. Sign in again to delete custom categories.")
+    identifier = category_id_or_name.strip()
+    with _connect(Path(db_path)) as connection:
+        cursor = connection.execute(
+            "DELETE FROM custom_categories WHERE user_id = ? AND (category_id = ? OR category_name = ?)",
+            (user["user_id"], identifier, identifier),
+        )
+        if cursor.rowcount == 0:
+            raise KeyError(f"Custom category '{identifier}' not found.")
+
+
+class _PayloadEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if is_dataclass(obj):
+            return asdict(obj)
+        if isinstance(obj, (date, datetime)):
+            return obj.isoformat()
+        if hasattr(obj, "to_dict"):
+            return obj.to_dict()
+        return super().default(obj)
+
+
+def _reconstruct_run_payload(module_type: str, data: dict) -> dict:
+    if not isinstance(data, dict):
+        return data
+    if module_type == "budget_optimizer" and "result" in data and isinstance(data["result"], dict):
+        from models.budget_csp import BudgetOptimizationResult, SearchStatistics
+
+        res_data = dict(data["result"])
+        stats_data = res_data.get("statistics")
+        if isinstance(stats_data, dict):
+            res_data["statistics"] = SearchStatistics(**stats_data)
+        data["result"] = BudgetOptimizationResult(**res_data)
+    elif module_type == "goal_planner" and "result" in data and isinstance(data["result"], dict):
+        from models.goal_astar import GoalPlanResult
+
+        res_data = dict(data["result"])
+        if isinstance(res_data.get("goal_month"), str):
+            res_data["goal_month"] = date.fromisoformat(res_data["goal_month"])
+        data["result"] = GoalPlanResult(**res_data)
+    return data
+
+
+def save_analysis_run(
+    user_id: str,
+    module_type: str,
+    ledger_fingerprint: str,
+    payload: dict,
+    db_path: str | Path = AUTH_DB_PATH,
+) -> str:
+    user = get_user_by_id(user_id, db_path)
+    if user is None:
+        raise ValueError("Account not found. Sign in again to save analysis runs.")
+    run_id = str(uuid4())
+    serialized = json.dumps(payload, cls=_PayloadEncoder)
+    with _connect(Path(db_path)) as connection:
+        connection.execute(
+            "INSERT INTO analysis_runs (run_id, user_id, module_type, ledger_fingerprint, result_payload, created_at) "
+            "VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+            (run_id, user["user_id"], module_type, ledger_fingerprint, serialized),
+        )
+    return run_id
+
+
+def get_latest_analysis_run(
+    user_id: str,
+    module_type: str,
+    db_path: str | Path = AUTH_DB_PATH,
+) -> dict | None:
+    user = get_user_by_id(user_id, db_path)
+    if user is None:
+        return None
+    with _connect(Path(db_path)) as connection:
+        row = connection.execute(
+            "SELECT run_id, module_type, ledger_fingerprint, result_payload, created_at "
+            "FROM analysis_runs WHERE user_id = ? AND module_type = ? "
+            "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (user["user_id"], module_type),
+        ).fetchone()
+    if row is None:
+        return None
+    payload = json.loads(row["result_payload"])
+    payload = _reconstruct_run_payload(module_type, payload)
+    payload["_persisted_run_id"] = row["run_id"]
+    payload["_created_at"] = row["created_at"]
+    return payload
 
 
 def export_user_data(user_id: str, db_path: str | Path = AUTH_DB_PATH) -> bytes:
     user = get_user_by_id(user_id, db_path)
     if user is None:
         raise ValueError("Account not found. Sign in again to export your data.")
-    ledger_path = user_transactions_path(user["user_id"], db_path)
     goals = get_user_goals(user["user_id"], db_path)
     profile_export = {
         "email": user["email"],
@@ -382,12 +831,23 @@ def export_user_data(user_id: str, db_path: str | Path = AUTH_DB_PATH) -> bytes:
         "created_at": user["created_at"],
     }
     preferences = get_user_preferences(user["user_id"], db_path)
+    with _connect(Path(db_path)) as connection:
+        tx_rows = connection.execute(
+            "SELECT transaction_id, date, type, category, amount, description FROM transactions WHERE user_id = ? ORDER BY date DESC, transaction_id DESC",
+            (user["user_id"],),
+        ).fetchall()
+    if tx_rows:
+        tx_df = pd.DataFrame([dict(r) for r in tx_rows])
+    else:
+        ledger_path = user_transactions_path(user["user_id"], db_path)
+        tx_df = pd.read_csv(ledger_path) if ledger_path.is_file() else pd.DataFrame(columns=["transaction_id", "date", "type", "category", "amount", "description"])
+
     archive_buffer = MemoryBuffer()
     with ZipFile(archive_buffer, "w", ZIP_DEFLATED) as archive:
         archive.writestr("profile.json", json.dumps(profile_export, indent=2))
         archive.writestr("goals.csv", pd.DataFrame(goals).to_csv(index=False))
         archive.writestr("preferences.json", json.dumps(preferences, indent=2))
-        archive.writestr("transactions.csv", ledger_path.read_bytes())
+        archive.writestr("transactions.csv", tx_df.to_csv(index=False))
     return archive_buffer.getvalue()
 
 
@@ -401,8 +861,11 @@ def clear_user_financial_data(user_id: str, db_path: str | Path = AUTH_DB_PATH) 
 
     save_transactions(pd.DataFrame(columns=TRANSACTION_COLUMNS), ledger_path)
     with _connect(Path(db_path)) as connection:
+        connection.execute("DELETE FROM transactions WHERE user_id = ?", (user["user_id"],))
+        connection.execute("DELETE FROM custom_categories WHERE user_id = ?", (user["user_id"],))
         connection.execute("DELETE FROM user_goals WHERE user_id = ?", (user["user_id"],))
         connection.execute("DELETE FROM user_preferences WHERE user_id = ?", (user["user_id"],))
+        connection.execute("DELETE FROM analysis_runs WHERE user_id = ?", (user["user_id"],))
         connection.execute("UPDATE users SET avatar_filename = NULL WHERE user_id = ?", (user["user_id"],))
     if avatar is not None:
         avatar.unlink(missing_ok=True)
@@ -427,9 +890,10 @@ def user_transactions_path(user_id: str, db_path: str | Path = AUTH_DB_PATH) -> 
 
     path = Path(db_path).resolve().parent / "user_data" / canonical_id / "transactions.csv"
     if not path.is_file():
-        from utils.data_loader import TRANSACTION_COLUMNS, save_transactions
+        from utils.data_loader import TRANSACTION_COLUMNS
 
-        save_transactions(pd.DataFrame(columns=TRANSACTION_COLUMNS), path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(columns=TRANSACTION_COLUMNS).to_csv(path, index=False)
     return path
 
 

@@ -6,6 +6,8 @@ from utils.auth import (
     change_user_password,
     export_user_data,
     get_user_by_id,
+    get_user_preferences,
+    save_user_preferences,
     update_user_profile,
     user_avatar_path,
 )
@@ -67,6 +69,29 @@ def render(frame) -> None:
     notice = st.session_state.pop("profile_notice", None)
     if notice:
         st.success(notice)
+
+    st.divider()
+    preferences = get_user_preferences(profile["user_id"])
+    st.subheader("Financial Starting Capital")
+    st.caption("Configure your opening liquid bank balance to reflect true available capital across the app.")
+    with st.form("starting_balance_form"):
+        initial_balance = st.number_input(
+            "Starting / Opening Balance ($)",
+            value=float(preferences.get("initial_balance", 0.0)),
+            min_value=0.0,
+            step=100.0,
+            format="%.2f",
+            help="Starting cash amount in your bank accounts before ledger transactions.",
+        )
+        balance_submitted = st.form_submit_button("Save starting balance", type="primary")
+    if balance_submitted:
+        try:
+            save_user_preferences(profile["user_id"], initial_balance=initial_balance)
+        except ValueError as error:
+            st.error(str(error))
+        else:
+            st.success("Starting balance updated successfully.")
+            st.rerun()
 
     st.divider()
     st.subheader("Change password")

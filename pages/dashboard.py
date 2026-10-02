@@ -53,20 +53,28 @@ def render(frame: pd.DataFrame, store_path: str | Path | None = None) -> None:
     previous_net = previous_income - previous_expenses
     current_savings_rate = (current_net / current_income) if current_income else None
     previous_savings_rate = ((previous_income - previous_expenses) / previous_income) if previous_income else None
+    user_prefs = get_user_preferences(user_id) if user_id else {}
+    initial_balance = float(user_prefs.get("initial_balance", 0.0))
     lifetime_income, lifetime_expenses = _cash_totals(frame)
-    current_balance = lifetime_income - lifetime_expenses
+    current_balance = initial_balance + lifetime_income - lifetime_expenses
 
     if frame.empty:
         st.info("Your private ledger is empty. Add transactions or import a CSV to start your snapshot.")
     elif current.empty:
         st.warning("There are no dated transactions in this period. Try Last 30 days or adjust the dates.")
 
+    balance_help = (
+        f"Initial balance (${initial_balance:,.2f}) plus cumulative ledger net flow."
+        if initial_balance > 0
+        else "Cumulative ledger net flow from a zero opening balance; set your starting balance in My Profile."
+    )
+
     metrics = st.columns(4)
     metrics[0].metric(
         "Current balance",
         format_currency(current_balance),
         delta=_currency_delta(current_net - previous_net, "net this period") if not previous.empty else None,
-        help="Cumulative ledger net flow from a zero opening balance; this is not a bank balance.",
+        help=balance_help,
     )
     metrics[1].metric("Income", format_currency(current_income), delta=_currency_delta(current_income - previous_income) if not previous.empty else None)
     metrics[2].metric("Expenses", format_currency(current_expenses), delta=_currency_delta(previous_expenses - current_expenses, "less spending") if not previous.empty else None, delta_color="normal")

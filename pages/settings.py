@@ -1,21 +1,25 @@
-"""Per-account preferences, sample data controls, and local privacy details."""
-
 import pandas as pd
 import streamlit as st
 
+from models.rule_engine import RuleThresholds
 from utils.auth import (
+    add_custom_category,
     clear_user_financial_data,
+    delete_custom_category,
     export_user_data,
+    get_user_categories,
     get_user_preferences,
+    get_user_thresholds,
     save_user_preferences,
+    save_user_thresholds,
     user_transactions_path,
 )
-from utils.data_loader import DEFAULT_DATA_PATH, load_transactions, save_transactions
+from utils.data_loader import DEFAULT_DATA_PATH, EXPENSE_CATEGORIES, INCOME_CATEGORIES, load_transactions, save_transactions
 
 
 def render(frame: pd.DataFrame) -> None:
     st.title("Settings")
-    st.caption("Personal preferences and data controls for this local account.")
+    st.caption("Personal preferences, custom categories, rule thresholds, and data controls.")
     if st.session_state.pop("_reset_clear_confirmation", False):
         st.session_state.pop("confirm_clear_user_data", None)
     if st.session_state.pop("_clear_user_data_notice", False):
@@ -45,6 +49,13 @@ def render(frame: pd.DataFrame) -> None:
             st.success("Your dashboard preference has been saved.")
             st.rerun()
 
+    st.divider()
+    _render_custom_categories_section(user_id)
+
+    st.divider()
+    _render_thresholds_tuning_section(user_id)
+
+    st.divider()
     data_col, privacy_col = st.columns([1, 1], gap="large")
     with data_col:
         st.subheader("Example data")
@@ -109,3 +120,111 @@ def render(frame: pd.DataFrame) -> None:
             st.session_state["_reset_clear_confirmation"] = True
             st.session_state["_clear_user_data_notice"] = True
             st.rerun()
+
+
+def _render_custom_categories_section(user_id: str) -> None:
+    st.subheader("Custom Categories")
+    st.write("Add your own custom categories for categorizing income and expenses in addition to system defaults.")
+
+    user_cats = get_user_categories(user_id)
+    custom_incomes = [c for c in user_cats["income"] if c not in INCOME_CATEGORIES]
+    custom_expenses = [c for c in user_cats["expense"] if c not in EXPENSE_CATEGORIES]
+
+    col_add, col_list = st.columns([1, 1], gap="large")
+    with col_add:
+        with st.form("add_custom_category_form", clear_on_submit=True):
+            cat_name = st.text_input("New category name", max_chars=50, placeholder="e.g. Pet Care, Freelance Design")
+            cat_type = st.radio("Category Type", ["Expense", "Income"], horizontal=True)
+            submitted_cat = st.form_submit_button("Add Category", type="primary")
+
+        if submitted_cat:
+            if not cat_name.strip():
+                st.error("Please enter a category name.")
+            else:
+                try:
+                    add_custom_category(user_id, cat_name.strip(), cat_type)
+                except ValueError as err:
+                    st.error(str(err))
+                else:
+                    st.success(f"Added custom {cat_type.lower()} category: '{cat_name.strip()}'.")
+                    st.rerun()
+
+    with col_list:
+        st.markdown("**Your Custom Categories**")
+        all_custom = [(c, "Income") for c in custom_incomes] + [(c, "Expense") for c in custom_expenses]
+        if not all_custom:
+            st.caption("No custom categories added yet. All system default categories are active.")
+        else:
+            for name, c_type in all_custom:
+                c_col1, c_col2 = st.columns([3, 1])
+                c_col1.write(f"• **{name}** ({c_type})")
+                if c_col2.button("Delete", key=f"del_cat_{name}_{c_type}"):
+                    try:
+                        delete_custom_category(user_id, name)
+                    except Exception as err:
+                        st.error(str(err))
+                    else:
+                        st.success(f"Deleted '{name}'.")
+                        st.rerun()
+
+
+def _render_thresholds_tuning_section(user_id: str) -> None:
+    st.subheader("Financial Rule Thresholds")
+    st.write("Tune personal benchmark limits for the Money Rules engine to match your financial situation.")
+
+    current = get_user_thresholds(user_id)
+    with st.form("rule_thresholds_tuning_form"):
+        r_col1, r_col2 = st.columns(2)
+        savings_low = r_col1.slider(
+            "Minimum Savings Ratio Alert Threshold (%)",
+            min_value=1,
+            max_value=30,
+            value=int(round(current.savings_low * 100)),
+            help="Alerts if monthly savings falls below this percentage of monthly income (Default: 10%).",
+        )
+        savings_healthy = r_col2.slider(
+            "Healthy Savings Ratio Target (%)",
+            min_value=10,
+            max_value=50,
+            value=int(round(current.savings_healthy * 100)),
+            help="Positive recommendation triggered when savings meet or exceed this level (Default: 20%).",
+        )
+
+        d_col1, d_col2 = st.columns(2)
+        discretionary = d_col1.slider(
+            "Maximum Discretionary Spending Cap (%)",
+            min_value=5,
+            max_value=50,
+            value=int(round(current.discretionary * 100)),
+            help="Alerts if entertainment/flexible spending exceeds this portion of total expenses (Default: 20%).",
+        )
+        burn_rate = d_col2.slider(
+            "Maximum 30-Day Burn Rate of Income (%)",
+            min_value=40,
+            max_value=120,
+            value=int(round(current.burn_rate_income * 100)),
+            help="Alerts if 30-day estimated expenses exceed this share of monthly income (Default: 80%).",
+        )
+
+        debt_income = st.slider(
+            "Maximum Debt-to-Income Payment Ratio (%)",
+            min_value=5,
+            max_value=50,
+            value=int(round(current.debt_income * 100)),
+            help="Alerts if monthly debt payments exceed this share of monthly income (Default: 20%).",
+        )
+
+        save_btn = st.form_submit_button("Save Thresholds", type="primary")
+
+    if save_btn:
+        new_thresholds = RuleThresholds(
+            savings_low=savings_low / 100.0,
+            savings_healthy=savings_healthy / 100.0,
+            discretionary=discretionary / 100.0,
+            burn_rate_income=burn_rate / 100.0,
+            debt_income=debt_income / 100.0,
+        )
+        save_user_thresholds(user_id, new_thresholds)
+        st.session_state.pop("rule_advisor_run", None)
+        st.success("Rule thresholds updated! Money Rules checks will evaluate against your new parameters.")
+        st.rerun()

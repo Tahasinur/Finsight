@@ -224,7 +224,8 @@ def _route_app() -> None:
 				selected_page = admin_page
 		st.divider()
 		if st.button("Sign out", use_container_width=True):
-			st.session_state.pop("user_id", None)
+			for key in list(st.session_state.keys()):
+				del st.session_state[key]
 			st.rerun()
 
 	if selected_page == "Admin Console":

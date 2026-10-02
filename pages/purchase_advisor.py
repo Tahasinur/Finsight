@@ -14,7 +14,7 @@ from models.purchase_classifier import (
     predict_purchase,
 )
 from models.spending_clustering import fit_spending_clusters
-from utils.auth import get_user_goals
+from utils.auth import get_latest_analysis_run, get_user_goals, get_user_preferences, save_analysis_run
 from utils.calculations import format_currency, monthly_financial_metrics, transaction_fingerprint
 
 
@@ -30,6 +30,10 @@ def render(frame: pd.DataFrame) -> None:
         "This estimate learns from labeled synthetic examples, not real purchase outcomes. Use it as a thinking aid, not financial advice."
     )
 
+    user_id = st.session_state.get("user_id")
+    user_prefs = get_user_preferences(user_id) if user_id else {}
+    initial_balance = float(user_prefs.get("initial_balance", 0.0))
+
     models = _trained_models()
     monthly = monthly_financial_metrics(frame)
     latest = monthly.iloc[-1] if not monthly.empty else None
@@ -37,7 +41,7 @@ def render(frame: pd.DataFrame) -> None:
     monthly_expenses = float(latest["expenses"]) if latest is not None else 0.0
     savings_rate = float(latest["savings_ratio"]) if latest is not None and pd.notna(latest["savings_ratio"]) else 0.0
     discretionary_share = float(latest["discretionary_ratio"]) if latest is not None and pd.notna(latest["discretionary_ratio"]) else 0.0
-    ledger_balance = max(0.0, float(frame.loc[frame["type"] == "income", "amount"].sum() - frame.loc[frame["type"] == "expense", "amount"].sum()))
+    ledger_balance = max(0.0, float(initial_balance + frame.loc[frame["type"] == "income", "amount"].sum() - frame.loc[frame["type"] == "expense", "amount"].sum()))
     consumer_type, consumer_error = _consumer_type(frame)
     context_cols = st.columns(4)
     context_cols[0].metric("Recorded monthly income", format_currency(monthly_income))
@@ -143,7 +147,7 @@ def render(frame: pd.DataFrame) -> None:
                 st.error(str(error))
                 st.session_state.pop("purchase_advisor_run", None)
             else:
-                st.session_state["purchase_advisor_run"] = {
+                run_data = {
                     "item_name": item_name.strip(),
                     "price": float(price),
                     "balance": float(balance),
@@ -154,13 +158,23 @@ def render(frame: pd.DataFrame) -> None:
                     "alternative": alternative,
                     "transaction_fingerprint": transaction_fingerprint(frame),
                 }
+                st.session_state["purchase_advisor_run"] = run_data
+                if user_id:
+                    try:
+                        save_analysis_run(user_id, "purchase_advisor", run_data["transaction_fingerprint"], run_data)
+                    except Exception as save_err:
+                        st.caption(f"Could not persist run to database: {save_err}")
+
+    if user_id and "purchase_advisor_run" not in st.session_state:
+        persisted = get_latest_analysis_run(user_id, "purchase_advisor")
+        if persisted:
+            st.session_state["purchase_advisor_run"] = persisted
 
     run = st.session_state.get("purchase_advisor_run")
     if run is not None:
         if run.get("transaction_fingerprint") != transaction_fingerprint(frame):
-            st.warning("Your transaction ledger changed since this check. Run it again for an up-to-date result.")
-        else:
-            _render_prediction(run, models)
+            st.warning("Your transaction ledger changed since this check was run. Run it again for an up-to-date result.")
+        _render_prediction(run, models)
 
     with st.expander("Why this is only a guide"):
         st.write("The two estimates learn from synthetic/demo examples because no real labeled purchase outcomes are available.")

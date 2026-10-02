@@ -36,7 +36,7 @@ def transaction_fingerprint(frame: pd.DataFrame) -> str:
     return hashlib.sha256(hashed_rows.to_numpy(dtype="uint64").tobytes()).hexdigest()
 
 
-def get_financial_summary(frame: pd.DataFrame) -> dict[str, float | str]:
+def get_financial_summary(frame: pd.DataFrame, initial_balance: float = 0.0) -> dict[str, float | str]:
     income = float(frame.loc[frame["type"] == "income", "amount"].sum())
     expenses = float(frame.loc[frame["type"] == "expense", "amount"].sum())
     savings_rate = ((income - expenses) / income * 100) if income else 0.0
@@ -48,6 +48,7 @@ def get_financial_summary(frame: pd.DataFrame) -> dict[str, float | str]:
         "income": income,
         "expenses": expenses,
         "net_cash_flow": income - expenses,
+        "current_balance": initial_balance + income - expenses,
         "savings_rate": savings_rate,
         "period": period,
     }

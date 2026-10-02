@@ -6,6 +6,7 @@ import pandas as pd
 import streamlit as st
 
 from models.rule_engine import RuleResult, evaluate_financial_rules
+from utils.auth import get_latest_analysis_run, get_user_thresholds, save_analysis_run
 from utils.calculations import monthly_financial_metrics, transaction_fingerprint
 
 
@@ -63,6 +64,8 @@ def render(frame: pd.DataFrame) -> None:
         )
         submitted = st.form_submit_button("Evaluate rules", type="primary")
 
+    user_id = st.session_state.get("user_id")
+    thresholds = get_user_thresholds(user_id)
     if submitted:
         try:
             rules = evaluate_financial_rules(
@@ -70,22 +73,39 @@ def render(frame: pd.DataFrame) -> None:
                 emergency_reserve_current=reserve_current,
                 emergency_reserve_target=reserve_target,
                 monthly_debt_payment=debt_payment,
+                thresholds=thresholds,
             )
         except ValueError as error:
             st.session_state.pop("rule_advisor_run", None)
             st.error(str(error))
             return
-        st.session_state["rule_advisor_run"] = {
+        run_data = {
             "metrics": metrics,
             "reserve_current": float(reserve_current),
             "reserve_target": float(reserve_target),
             "debt_payment": float(debt_payment),
+            "thresholds": thresholds.to_dict(),
             "rules": [asdict(rule) for rule in rules],
             "transaction_fingerprint": transaction_fingerprint(frame),
         }
+        st.session_state["rule_advisor_run"] = run_data
+        user_id = st.session_state.get("user_id")
+        if user_id:
+            try:
+                save_analysis_run(user_id, "rule_advisor", run_data["transaction_fingerprint"], run_data)
+            except Exception as save_err:
+                st.caption(f"Could not persist run to database: {save_err}")
+
+    user_id = st.session_state.get("user_id")
+    if user_id and "rule_advisor_run" not in st.session_state:
+        persisted = get_latest_analysis_run(user_id, "rule_advisor")
+        if persisted:
+            st.session_state["rule_advisor_run"] = persisted
 
     run = st.session_state.get("rule_advisor_run")
     if run is not None:
+        if run.get("transaction_fingerprint") != transaction_fingerprint(frame):
+            st.warning("Your transaction ledger changed since these rules were evaluated. Re-evaluate for an up-to-date check.")
         rules = [RuleResult(**record) for record in run["rules"]]
         _render_rules(rules)
 

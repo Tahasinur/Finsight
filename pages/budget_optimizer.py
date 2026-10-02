@@ -8,6 +8,7 @@ from models.budget_csp import (
     BudgetOptimizationResult,
     optimize_budget_csp,
 )
+from utils.auth import get_latest_analysis_run, get_user_categories, save_analysis_run
 from utils.calculations import format_currency, monthly_financial_metrics, transaction_fingerprint
 
 
@@ -18,7 +19,27 @@ def render(frame: pd.DataFrame) -> None:
         "Enter net spendable monthly income. Existing category targets are prefilled from the latest transaction month; debt and reserve targets require your input if they are not recorded in the ledger."
     )
 
-    defaults = _transaction_defaults(frame)
+    user_id = st.session_state.get("user_id")
+    user_categories = get_user_categories(user_id)
+    expense_categories = user_categories.get("expense", [])
+
+    with st.expander("Inspect category spend & calibrate targets"):
+        cat_col1, cat_col2 = st.columns([1.5, 1])
+        selected_cat = cat_col1.selectbox(
+            "Category",
+            expense_categories,
+            help="Review recent monthly spend across standard and custom categories to calibrate your budget targets.",
+        )
+        if not frame.empty and "category" in frame.columns and "amount" in frame.columns:
+            recent_month_mask = frame["date"].dt.to_period("M") == frame["date"].max().to_period("M")
+            recent_spend = float(
+                frame.loc[recent_month_mask & (frame["category"] == selected_cat) & (frame["type"] == "expense"), "amount"].sum()
+            )
+            cat_col2.metric(f"{selected_cat} (Latest Month)", format_currency(recent_spend))
+        else:
+            cat_col2.caption("No transaction records found.")
+
+    defaults = _transaction_defaults(frame, expense_categories)
     with st.form("budget_optimizer_form"):
         income = st.number_input(
             "Net monthly income",
@@ -42,6 +63,7 @@ def render(frame: pd.DataFrame) -> None:
         savings = st.number_input("Savings target", min_value=0.0, value=defaults["savings"], step=25.0, format="%.2f")
         submitted = st.form_submit_button("Search for an allocation", type="primary")
 
+    user_id = st.session_state.get("user_id")
     if submitted:
         targets = {
             "housing": housing,
@@ -60,19 +82,32 @@ def render(frame: pd.DataFrame) -> None:
             st.session_state.pop("budget_optimizer_run", None)
             st.error(str(error))
         else:
-            st.session_state["budget_optimizer_run"] = {
+            run_data = {
                 "monthly_income": float(income),
                 "targets": targets,
                 "result": result,
                 "transaction_fingerprint": transaction_fingerprint(frame),
             }
+            st.session_state["budget_optimizer_run"] = run_data
+            if user_id:
+                try:
+                    save_analysis_run(user_id, "budget_optimizer", run_data["transaction_fingerprint"], run_data)
+                except Exception as save_err:
+                    st.caption(f"Could not persist run to database: {save_err}")
+
+    if user_id and "budget_optimizer_run" not in st.session_state:
+        persisted = get_latest_analysis_run(user_id, "budget_optimizer")
+        if persisted:
+            st.session_state["budget_optimizer_run"] = persisted
 
     run = st.session_state.get("budget_optimizer_run")
     if run is not None:
+        if run.get("transaction_fingerprint") != transaction_fingerprint(frame):
+            st.warning("Your transaction ledger changed since this allocation search was run. Search again for an up-to-date result.")
         _render_result(run["monthly_income"], run["targets"], run["result"])
 
 
-def _transaction_defaults(frame: pd.DataFrame) -> dict[str, float]:
+def _transaction_defaults(frame: pd.DataFrame, expense_categories: list[str] | None = None) -> dict[str, float]:
     defaults = {
         "monthly_income": 0.0,
         "housing": 0.0,
@@ -94,10 +129,25 @@ def _transaction_defaults(frame: pd.DataFrame) -> dict[str, float]:
     defaults["savings"] = max(0.0, float(latest["remaining_balance"]))
     month_frame = frame.loc[frame["date"].dt.to_period("M").dt.to_timestamp() == latest["month"]]
     expenses = month_frame.loc[month_frame["type"] == "expense"]
-    for category in ["Housing", "Food", "Transportation", "Health", "Education", "Entertainment"]:
+
+    standard_map = {
+        "Housing": "housing",
+        "Food": "food",
+        "Transportation": "transportation",
+        "Health": "health",
+        "Education": "education",
+    }
+    for category, key in standard_map.items():
         amount = expenses.loc[expenses["category"] == category, "amount"].sum()
-        key = "discretionary" if category == "Entertainment" else category.lower()
         defaults[key] = float(amount)
+
+    all_cats = expense_categories if expense_categories else expenses["category"].dropna().unique().tolist()
+    discretionary_amount = 0.0
+    for cat in all_cats:
+        if cat not in standard_map:
+            discretionary_amount += float(expenses.loc[expenses["category"] == cat, "amount"].sum())
+    defaults["discretionary"] = discretionary_amount
+
     debt_mask = expenses["description"].astype("string").str.contains("debt payment", case=False, na=False)
     defaults["debt_payment"] = float(expenses.loc[debt_mask, "amount"].sum())
     return defaults

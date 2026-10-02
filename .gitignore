@@ -1,0 +1,25 @@
+# Virtual environments
+.venv/
+env/
+venv/
+
+# Bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Local databases and user records (keep example data)
+*.sqlite3*
+data/profile_images/*
+!data/profile_images/.gitkeep
+data/user_data/*
+!data/user_data/.gitkeep
+*.csv.migrated
+*.tmp*
+
+# IDE and OS artifacts
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

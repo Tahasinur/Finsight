@@ -5,6 +5,7 @@ import streamlit as st
 
 from models.preprocessing import preprocess_transactions
 from models.spending_clustering import fit_spending_clusters
+from utils.auth import get_latest_analysis_run
 from utils.calculations import format_currency, monthly_financial_metrics, transaction_fingerprint
 
 
@@ -15,15 +16,22 @@ def render(frame: pd.DataFrame) -> None:
     st.title("Your Money Snapshot")
     st.caption("A plain-language summary of your finances and completed planning tools.")
 
+    user_id = st.session_state.get("user_id")
     signature = transaction_fingerprint(frame)
     runs = {}
-    for key, label in [
-        ("purchase_advisor_run", "Should I Buy This?"),
-        ("budget_optimizer_run", "Smart Budget Helper"),
-        ("rule_advisor_run", "Money Rules"),
-        ("goal_planner_run", "Goal Pathfinder"),
+    for key, module_type, label in [
+        ("purchase_advisor_run", "purchase_advisor", "Should I Buy This?"),
+        ("budget_optimizer_run", "budget_optimizer", "Smart Budget Helper"),
+        ("rule_advisor_run", "rule_advisor", "Money Rules"),
+        ("goal_planner_run", "goal_planner", "Goal Pathfinder"),
     ]:
         saved = st.session_state.get(key)
+        if saved is None and user_id:
+            persisted = get_latest_analysis_run(user_id, module_type)
+            if persisted:
+                saved = persisted
+                st.session_state[key] = saved
+
         if saved is not None and saved.get("transaction_fingerprint") == signature:
             runs[key] = saved
         elif saved is not None:
@@ -195,7 +203,7 @@ def _build_actions(triggered_rules, purchase_run, budget_run, goal_run) -> list[
         if prediction in {"Better Wait", "No"}:
             actions.append(
                 {
-                    "priority": "High" if prediction == "Rejected" else "Medium",
+                    "priority": "High" if prediction == "No" else "Medium",
                     "source": "Purchase estimate",
                     "text": f"Review {purchase_run['item_name']} before proceeding; the demo-trained estimate returned {prediction}.",
                 }

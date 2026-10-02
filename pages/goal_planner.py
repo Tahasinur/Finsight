@@ -7,7 +7,7 @@ import plotly.express as px
 import streamlit as st
 
 from models.goal_astar import GoalPlanResult, plan_savings_goal
-from utils.auth import save_user_goal
+from utils.auth import get_latest_analysis_run, save_analysis_run, save_user_goal
 from utils.calculations import format_currency, monthly_financial_metrics, transaction_fingerprint
 
 
@@ -82,7 +82,7 @@ def render(frame: pd.DataFrame) -> None:
             st.session_state.pop("goal_planner_run", None)
             st.error(str(error))
         else:
-            st.session_state["goal_planner_run"] = {
+            run_data = {
                 "goal_name": goal_name.strip(),
                 "target_amount": float(target_amount),
                 "current_savings": float(current_savings),
@@ -94,9 +94,24 @@ def render(frame: pd.DataFrame) -> None:
                 "result": result,
                 "transaction_fingerprint": transaction_fingerprint(frame),
             }
+            st.session_state["goal_planner_run"] = run_data
+            user_id = st.session_state.get("user_id")
+            if user_id:
+                try:
+                    save_analysis_run(user_id, "goal_planner", run_data["transaction_fingerprint"], run_data)
+                except Exception as save_err:
+                    st.caption(f"Could not persist run to database: {save_err}")
+
+    user_id = st.session_state.get("user_id")
+    if user_id and "goal_planner_run" not in st.session_state:
+        persisted = get_latest_analysis_run(user_id, "goal_planner")
+        if persisted:
+            st.session_state["goal_planner_run"] = persisted
 
     run = st.session_state.get("goal_planner_run")
     if run is not None:
+        if run.get("transaction_fingerprint") != transaction_fingerprint(frame):
+            st.warning("Your transaction ledger changed since this goal path was generated. Re-plan for an up-to-date route.")
         _render_result(run["result"])
         if run.get("saved_goal_id"):
             st.caption(f"This goal and deadline are saved to your account and are available to the dashboard and purchase check.")

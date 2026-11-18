@@ -474,7 +474,7 @@ def main() -> None:
 
 
 def _route_app() -> None:
-	user_id = st.session_state.get("user_id")
+	user_id = st.session_state.get("user_id") or st.query_params.get("u")
 	active_user_id = st.session_state.get("_active_user_id")
 	if user_id != active_user_id:
 		st.session_state.clear()
@@ -485,9 +485,15 @@ def _route_app() -> None:
 	if user is None:
 		st.session_state.pop("user_id", None)
 		st.session_state.pop("user_role", None)
+		if "u" in st.query_params:
+			del st.query_params["u"]
 		_render_public_app()
 		return
+	st.session_state["user_id"] = user["user_id"]
+	st.session_state["_active_user_id"] = user["user_id"]
 	st.session_state["user_role"] = user["role"]
+	if st.query_params.get("u") != user["user_id"]:
+		st.query_params["u"] = user["user_id"]
 
 	try:
 		store_path = user_transactions_path(user["user_id"])
@@ -510,7 +516,8 @@ def _route_app() -> None:
 		}
 		if query_nav in nav_map:
 			st.session_state["finwise_workspace_page"] = nav_map[query_nav]
-			st.query_params.clear()
+		if "nav" in st.query_params:
+			del st.query_params["nav"]
 
 	with st.sidebar:
 		st.markdown(
@@ -565,7 +572,7 @@ def _route_app() -> None:
 				  </div>
 				  <div class="fw-insight-title">Weekly insight</div>
 				  <div class="fw-insight-desc">You spent 12% less on dining this week.</div>
-				  <a href="?nav=spending" class="fw-insight-link">View insight &rsaquo;</a>
+				  <a href="?nav=spending" target="_self" class="fw-insight-link">View insight &rsaquo;</a>
 				</div>
 				"""
 			),
@@ -579,14 +586,14 @@ def _route_app() -> None:
 				f"""\
 				<div style="margin-top: 10px;">
 				  <div style="border-top: 1px solid #F1F5F9; margin: 16px 0 10px 0;"></div>
-				  <a href="?nav=settings" class="fw-sidebar-bottom-item">
+				  <a href="?nav=settings" target="_self" class="fw-sidebar-bottom-item">
 				    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#475569" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
 				      <circle cx="12" cy="12" r="3"></circle>
 				      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
 				    </svg>
 				    <span>Settings</span>
 				  </a>
-				  <a href="?nav=profile" class="fw-sidebar-user-card">
+				  <a href="?nav=profile" target="_self" class="fw-sidebar-user-card">
 				    <div class="fw-sidebar-user-avatar">{user_initials}</div>
 				    <div class="fw-sidebar-user-info">
 				      <div class="fw-sidebar-user-name">{user['display_name']}</div>
@@ -618,6 +625,7 @@ def _route_app() -> None:
 
 		st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
 		if st.button("Sign out", use_container_width=True):
+			st.query_params.clear()
 			for key in list(st.session_state.keys()):
 				del st.session_state[key]
 			st.rerun()
@@ -662,6 +670,7 @@ def _render_public_app() -> None:
 
 	def authenticate(profile_data: dict) -> None:
 		st.session_state["user_id"] = profile_data["user_id"]
+		st.query_params["u"] = profile_data["user_id"]
 		user_transactions_path(profile_data["user_id"])
 		st.rerun()
 

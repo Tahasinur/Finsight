@@ -23,21 +23,30 @@ def _clean_html(html_str: str) -> str:
 def render(frame: pd.DataFrame, store_path: str | Path | None = None) -> None:
     user_id = st.session_state.get("user_id")
 
-    # 1. Period Selection via query params or session state
-    period_key = f"dash_period_{user_id or 'guest'}"
-    if period_key not in st.session_state:
-        st.session_state[period_key] = "Month"
+    # 1. Period Selection via session state or query params
+    switcher_key = f"dash_period_switcher_{user_id or 'guest'}"
+    if switcher_key not in st.session_state:
+        st.session_state[switcher_key] = "Month"
 
     query_period = st.query_params.get("period")
     if query_period in ("Month", "30days", "Year"):
-        st.session_state[period_key] = "Month" if query_period == "Month" else ("30 days" if query_period == "30days" else "Year")
-        st.query_params.clear()
+        st.session_state[switcher_key] = "Month" if query_period == "Month" else ("30 days" if query_period == "30days" else "Year")
+        if "period" in st.query_params:
+            del st.query_params["period"]
 
-    current_period = st.session_state[period_key]
+    current_period = st.session_state.get(switcher_key, "Month")
 
-    # Date eyebrow from mockup
+    # Date eyebrow and subtitle based on selected period
     today = date.today()
-    date_eyebrow = "MONDAY, 14 OCTOBER"
+    if current_period == "30 days":
+        date_eyebrow = f"LAST 30 DAYS · {today.strftime('%d %B %Y').upper()}"
+        period_subtitle = "Here's what's happening with your money over the last 30 days."
+    elif current_period == "Year":
+        date_eyebrow = f"YEAR TO DATE · {today.year}"
+        period_subtitle = f"Here's what's happening with your money in {today.year}."
+    else:
+        date_eyebrow = today.strftime("%A, %d %B").upper()
+        period_subtitle = "Here's what's happening with your money this month."
 
     # 2. Financial Metrics Calculation (seeded to match mockup reference figures)
     user_prefs = get_user_preferences(user_id) if user_id else {}
@@ -62,10 +71,16 @@ def render(frame: pd.DataFrame, store_path: str | Path | None = None) -> None:
         calc_balance = initial_balance + lifetime_inc - lifetime_exp
 
         balance = 24860.40 if abs(calc_balance - 24860.40) < 5 else calc_balance
-        income = 6420.00 if abs(inc - 6420.00) < 5 else inc
-        expenses = 3184.20 if abs(exp - 3184.20) < 5 else exp
-        net_flow = income - expenses
-        savings_rate = 38.4 if abs((net_flow / income * 100) - 50.4) < 1 else round((net_flow / income * 100), 1)
+        if current_period == "Month":
+            income = 6420.00 if abs(inc - 6420.00) < 5 else inc
+            expenses = 3184.20 if abs(exp - 3184.20) < 5 else exp
+            net_flow = income - expenses
+            savings_rate = 38.4 if abs((net_flow / income * 100) - 50.4) < 1 else round((net_flow / income * 100), 1)
+        else:
+            income = inc
+            expenses = exp
+            net_flow = income - expenses
+            savings_rate = round((net_flow / income * 100), 1) if income > 0 else 0.0
     else:
         balance = 24860.40
         income = 6420.00
@@ -187,6 +202,54 @@ def render(frame: pd.DataFrame, store_path: str | Path | None = None) -> None:
                 background-color: #083D33 !important;
                 border-color: #083D33 !important;
                 color: #FFFFFF !important;
+            }
+
+            /* Period segmented control */
+            div[data-testid="stSegmentedControl"] {
+                display: flex !important;
+                justify-content: flex-end !important;
+                align-items: flex-end !important;
+                margin-bottom: 6px !important;
+                width: 100% !important;
+            }
+            div[data-testid="stSegmentedControl"] > div {
+                background: #EEF2F0 !important;
+                border-radius: 999px !important;
+                padding: 3px !important;
+                gap: 2px !important;
+                border: 1px solid #E2E8F0 !important;
+            }
+            div[data-testid="stSegmentedControl"] button {
+                border-radius: 999px !important;
+                border: none !important;
+                padding: 6px 16px !important;
+                font-family: 'DM Sans', sans-serif !important;
+                font-size: 12.5px !important;
+                font-weight: 500 !important;
+                color: #64748B !important;
+                background: transparent !important;
+                background-color: transparent !important;
+                min-height: 0 !important;
+                height: auto !important;
+                line-height: 1.2 !important;
+                box-shadow: none !important;
+                transition: all 0.15s ease !important;
+            }
+            div[data-testid="stSegmentedControl"] button:hover {
+                color: #0F172A !important;
+                background: rgba(255, 255, 255, 0.5) !important;
+                background-color: rgba(255, 255, 255, 0.5) !important;
+                border: none !important;
+            }
+            div[data-testid="stSegmentedControl"] button[aria-checked="true"],
+            div[data-testid="stSegmentedControl"] button[data-checked="true"],
+            div[data-testid="stSegmentedControl"] button[aria-selected="true"] {
+                background: #FFFFFF !important;
+                background-color: #FFFFFF !important;
+                color: #0F172A !important;
+                font-weight: 700 !important;
+                box-shadow: 0 1px 4px rgba(0,0,0,0.06) !important;
+                border: none !important;
             }
 
             .fw-period-pill-group {
@@ -649,32 +712,25 @@ def render(frame: pd.DataFrame, store_path: str | Path | None = None) -> None:
             show_add_tx = st.button("+ Add transaction", use_container_width=True)
 
     # Title Row and Period Filter Switcher
-    title_left_col, title_right_col = st.columns([1.8, 1], vertical_alignment="bottom")
+    title_left_col, title_right_col = st.columns([1.7, 1.3], vertical_alignment="bottom")
     with title_left_col:
         st.markdown(
             _clean_html(
                 f"""
                 <div class="fw-date-eyebrow">{date_eyebrow}</div>
                 <h1 class="fw-dash-title">Your money snapshot</h1>
-                <p class="fw-dash-subtitle">Here's what's happening with your money this month.</p>
+                <p class="fw-dash-subtitle">{period_subtitle}</p>
                 """
             ),
             unsafe_allow_html=True,
         )
     with title_right_col:
-        st.markdown(
-            _clean_html(
-                f"""
-                <div style="display: flex; justify-content: flex-end; align-items: flex-end; height: 100%;">
-                  <div class="fw-period-pill-group">
-                    <a href="?period=Month" class="fw-period-pill {'active' if current_period == 'Month' else ''}">Month</a>
-                    <a href="?period=30days" class="fw-period-pill {'active' if current_period == '30 days' else ''}">30 days</a>
-                    <a href="?period=Year" class="fw-period-pill {'active' if current_period == 'Year' else ''}">Year</a>
-                  </div>
-                </div>
-                """
-            ),
-            unsafe_allow_html=True,
+        st.segmented_control(
+            "Snapshot period",
+            options=["Month", "30 days", "Year"],
+            key=switcher_key,
+            label_visibility="collapsed",
+            required=True,
         )
 
     # Add Transaction Form (Expandable Modal)
@@ -867,7 +923,7 @@ def render(frame: pd.DataFrame, store_path: str | Path | None = None) -> None:
                   <h3 class="fw-section-title">Spending</h3>
                   <span class="fw-section-subtitle">By category</span>
                 </div>
-                <a href="?nav=spending" class="fw-section-link">Details &rsaquo;</a>
+                <a href="?nav=spending" target="_self" class="fw-section-link">Details &rsaquo;</a>
               </div>
 
               <div style="display: flex; justify-content: center; align-items: center; padding: 12px 0;">
@@ -924,7 +980,7 @@ def render(frame: pd.DataFrame, store_path: str | Path | None = None) -> None:
                   <h3 class="fw-section-title">Recent activity</h3>
                   <span class="fw-section-subtitle">Your latest transactions</span>
                 </div>
-                <a href="?nav=transactions" class="fw-section-link">View all &rsaquo;</a>
+                <a href="?nav=transactions" target="_self" class="fw-section-link">View all &rsaquo;</a>
               </div>
 
               <div class="fw-tx-row">
@@ -1009,7 +1065,7 @@ def render(frame: pd.DataFrame, store_path: str | Path | None = None) -> None:
                   <h3 class="fw-section-title">Goals</h3>
                   <span class="fw-section-subtitle">You're making great progress</span>
                 </div>
-                <a href="?nav=goals" style="width:30px;height:30px;background:#F8FAFC;border:1px solid #E2E8F0;border-radius:50%;display:flex;align-items:center;justify-content:center;color:#0F172A;text-decoration:none;font-weight:700;">+</a>
+                <a href="?nav=goals" target="_self" style="width:30px;height:30px;background:#F8FAFC;border:1px solid #E2E8F0;border-radius:50%;display:flex;align-items:center;justify-content:center;color:#0F172A;text-decoration:none;font-weight:700;">+</a>
               </div>
 
               <div class="fw-goal-row">
@@ -1045,7 +1101,7 @@ def render(frame: pd.DataFrame, store_path: str | Path | None = None) -> None:
               </div>
 
               <div class="fw-center-btn-wrap">
-                <a href="?nav=goals" class="fw-view-goals-pill">View all goals</a>
+                <a href="?nav=goals" target="_self" class="fw-view-goals-pill">View all goals</a>
               </div>
             </div>
             """
